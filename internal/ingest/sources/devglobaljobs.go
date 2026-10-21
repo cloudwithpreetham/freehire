@@ -17,18 +17,22 @@ import (
 // posting's company from the feed.
 //
 // The /api/v1/jobs endpoint returns recent postings across all categories. Full descriptions are
-// fetched via /api/v1/jobs/<id> only for unseen postings that are not ATS-covered (CoverageGated),
-// falling back to the excerpt if detail fails.
+// fetched via /api/v1/jobs/<id> only for unseen postings that are not ATS-covered (CoverageGated).
+// Failed detail requests yield unreadableDetail markers rather than falling back to excerpts.
 type devglobaljobs struct {
 	http JSONGetter
 }
 
 const (
-	devglobaljobsListURL    = "https://devglobaljobs.com/api/v1/jobs"
-	devglobaljobsPageSize   = 100
-	devglobaljobsMaxPages   = 100 // bounds pagination against runaway loops
-	devglobaljobsDetailURL  = "https://devglobaljobs.com/api/v1/jobs/%s"
-	devglobaljobsSweepGrace = 14 * 24 * time.Hour
+	devglobaljobsListURL   = "https://devglobaljobs.com/api/v1/jobs"
+	devglobaljobsPageSize  = 100
+	devglobaljobsMaxPages  = 100 // bounds pagination against runaway loops; offset is clamped at 10,000
+	devglobaljobsDetailURL = "https://devglobaljobs.com/api/v1/jobs/%s"
+	// devglobaljobsSweepGrace is 30 days because the API clamps offset pagination at 10,000,
+	// which covers only the newest ~36 hours of the feed. Postings older than ~1.5 days drop
+	// out of the reachable crawl window and cannot have their seen timestamp refreshed; a wider
+	// grace period prevents the sweep from prematurely closing active jobs.
+	devglobaljobsSweepGrace = 30 * 24 * time.Hour
 )
 
 // NewDevGlobalJobs builds the Dev Global Jobs adapter over the given HTTP client.
@@ -138,20 +142,29 @@ func (s devglobaljobs) FetchNewGated(ctx context.Context, _ CompanyEntry, seen f
 	}
 
 	hydrated := fetchDetails(toHydrate, defaultDetailWorkers, func(p devglobaljobsPosting) (Job, bool) {
-		return s.detail(ctx, p), true
+		return s.detail(ctx, p)
 	})
 
 	return append(out, hydrated...), nil
 }
 
-func (s devglobaljobs) detail(ctx context.Context, p devglobaljobsPosting) Job {
+func (s devglobaljobs) detail(ctx context.Context, p devglobaljobsPosting) (Job, bool) {
 	idStr := strconv.FormatInt(p.ID, 10)
-	desc := p.DescriptionExcerpt
-	var d devglobaljobsDetail
-	if err := s.http.GetJSON(ctx, fmt.Sprintf(devglobaljobsDetailURL, idStr), &d); err == nil && strings.TrimSpace(d.Description) != "" {
-		desc = d.Description
+	url := p.URL
+	if url == "" {
+		url = fmt.Sprintf("https://devglobaljobs.com/jobs/detail/%s", idStr)
 	}
-	return p.toJob(desc)
+	var d devglobaljobsDetail
+	if err := s.http.GetJSON(ctx, fmt.Sprintf(devglobaljobsDetailURL, idStr), &d); err != nil {
+		if detailUnreadable(err) {
+			return unreadableDetail(idStr, url, p.Organization), true
+		}
+		return Job{}, false
+	}
+	if strings.TrimSpace(d.Description) == "" {
+		return unreadableDetail(idStr, url, p.Organization), true
+	}
+	return p.toJob(d.Description), true
 }
 
 func (p devglobaljobsPosting) toJob(desc string) Job {
@@ -177,8 +190,7 @@ func (p devglobaljobsPosting) toJob(desc string) Job {
 	}
 
 	locLower := strings.ToLower(p.Location)
-	catLower := strings.ToLower(p.Category)
-	if strings.Contains(locLower, "remote") || catLower == "remote" {
+	if strings.Contains(locLower, "remote") {
 		job.Remote = true
 		job.WorkMode = "remote"
 	} else if strings.Contains(locLower, "hybrid") {

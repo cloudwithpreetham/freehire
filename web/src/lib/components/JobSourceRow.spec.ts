@@ -121,4 +121,13 @@ describe('JobSourceRow', () => {
     const other = render(JobSourceRow, props);
     expect(other.container.textContent).not.toContain('jobs by');
   });
+
+  it('carries the Dev Global Jobs attribution only for Dev Global Jobs', () => {
+    // Required by Dev Global Jobs API terms.
+    const { container } = render(JobSourceRow, { ...props, source: 'devglobaljobs' });
+    expect(container.textContent).toContain('Powered by Dev Global Jobs');
+
+    const other = render(JobSourceRow, props);
+    expect(other.container.textContent).not.toContain('Powered by Dev Global Jobs');
+  });
 });

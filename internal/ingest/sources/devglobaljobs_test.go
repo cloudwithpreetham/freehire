@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 )
@@ -26,8 +28,11 @@ func TestDevGlobalJobsMarkers(t *testing.T) {
 	if _, ok := s.(CoverageGated); !ok {
 		t.Error("devglobaljobs should implement CoverageGated")
 	}
-	if gs, ok := s.(sweepGrace); !ok || gs.sweepGrace() != 14*24*time.Hour {
-		t.Errorf("devglobaljobs sweepGrace() = %v, want 14 days", gs.sweepGrace())
+	if gs, ok := s.(sweepGrace); !ok || gs.sweepGrace() != 30*24*time.Hour {
+		t.Errorf("devglobaljobs sweepGrace() = %v, want 30 days", gs.sweepGrace())
+	}
+	if !slices.Contains(FilterableProviders(), "devglobaljobs") {
+		t.Error("FilterableProviders() should include devglobaljobs")
 	}
 }
 
@@ -52,23 +57,28 @@ func TestDevGlobalJobsFetch(t *testing.T) {
 				"organization": "RemoteCo",
 				"location": "Remote",
 				"country": "GB",
-				"category": "remote",
+				"category": "technology",
 				"jobType": "Contract",
-				"descriptionExcerpt": "Remote work only",
+				"descriptionExcerpt": "Remote work excerpt",
 				"postedAt": "2026-10-20T05:11:28.119Z",
 				"url": "https://devglobaljobs.com/jobs/detail/165916167"
 			}
 		]
 	}`
 
-	detailJSON := `{
+	detailJSON1 := `{
 		"id": 165923983,
 		"description": "<p>Full detailed description from API</p>"
+	}`
+	detailJSON2 := `{
+		"id": 165916167,
+		"description": "<p>Remote work only full description</p>"
 	}`
 
 	routed := (&routedHTTP{}).
 		route("offset=0", listJSON).
-		route("/api/v1/jobs/165923983", detailJSON)
+		route("/api/v1/jobs/165923983", detailJSON1).
+		route("/api/v1/jobs/165916167", detailJSON2)
 
 	jobs, err := NewDevGlobalJobs(routed).Fetch(context.Background(), CompanyEntry{})
 	if err != nil {
@@ -79,7 +89,7 @@ func TestDevGlobalJobsFetch(t *testing.T) {
 		t.Fatalf("len(jobs) = %d, want 2", len(jobs))
 	}
 
-	// First job has detailed description and country mapped
+	// First job
 	j1 := jobs[0]
 	if j1.ExternalID != "165923983" {
 		t.Errorf("ExternalID = %q, want 165923983", j1.ExternalID)
@@ -106,7 +116,7 @@ func TestDevGlobalJobsFetch(t *testing.T) {
 		t.Error("PostedAt is nil")
 	}
 
-	// Second job fell back to DescriptionExcerpt because no detail route was mocked, and has Remote / Contract mapped
+	// Second job
 	j2 := jobs[1]
 	if j2.ExternalID != "165916167" {
 		t.Errorf("ExternalID = %q, want 165916167", j2.ExternalID)
@@ -120,8 +130,128 @@ func TestDevGlobalJobsFetch(t *testing.T) {
 	if !reflect.DeepEqual(j2.Countries, []string{"gb"}) {
 		t.Errorf("Countries = %v, want [gb]", j2.Countries)
 	}
-	if j2.Description != "Remote work only" {
-		t.Errorf("Description = %q, want 'Remote work only'", j2.Description)
+	if j2.Description != "<p>Remote work only full description</p>" {
+		t.Errorf("Description = %q", j2.Description)
+	}
+}
+
+func TestDevGlobalJobsRemoteParsing(t *testing.T) {
+	listJSON := `{
+		"jobs": [
+			{
+				"id": 1,
+				"title": "Engineer",
+				"organization": "Acme",
+				"location": "Berlin, Germany",
+				"category": "remote",
+				"url": "https://devglobaljobs.com/jobs/detail/1"
+			},
+			{
+				"id": 2,
+				"title": "Engineer",
+				"organization": "Acme",
+				"location": "Fully Remote - US",
+				"category": "engineering",
+				"url": "https://devglobaljobs.com/jobs/detail/2"
+			},
+			{
+				"id": 3,
+				"title": "Engineer",
+				"organization": "Acme",
+				"location": "Hybrid - London, UK",
+				"category": "engineering",
+				"url": "https://devglobaljobs.com/jobs/detail/3"
+			}
+		]
+	}`
+
+	routed := (&routedHTTP{}).
+		route("offset=0", listJSON).
+		route("/api/v1/jobs/1", `{"id":1,"description":"desc"}`).
+		route("/api/v1/jobs/2", `{"id":2,"description":"desc"}`).
+		route("/api/v1/jobs/3", `{"id":3,"description":"desc"}`)
+
+	jobs, err := NewDevGlobalJobs(routed).Fetch(context.Background(), CompanyEntry{})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(jobs) != 3 {
+		t.Fatalf("len(jobs) = %d, want 3", len(jobs))
+	}
+
+	// category: "remote" with location: "Berlin, Germany" must NOT be marked remote
+	if jobs[0].Remote || jobs[0].WorkMode == "remote" {
+		t.Errorf("job 1 with location 'Berlin, Germany' and category 'remote' should not be remote: %+v", jobs[0])
+	}
+
+	// location: "Fully Remote - US"
+	if !jobs[1].Remote || jobs[1].WorkMode != "remote" {
+		t.Errorf("job 2 with location 'Fully Remote - US' should be remote: %+v", jobs[1])
+	}
+
+	// location: "Hybrid - London, UK"
+	if jobs[2].Remote || jobs[2].WorkMode != "hybrid" {
+		t.Errorf("job 3 with location 'Hybrid - London, UK' should be hybrid: %+v", jobs[2])
+	}
+}
+
+func TestDevGlobalJobsDetailFailure(t *testing.T) {
+	listJSON := `{
+		"jobs": [
+			{
+				"id": 101,
+				"title": "Software Engineer",
+				"organization": "CompanyA",
+				"url": "https://devglobaljobs.com/jobs/detail/101"
+			},
+			{
+				"id": 102,
+				"title": "Backend Dev",
+				"organization": "CompanyB",
+				"url": "https://devglobaljobs.com/jobs/detail/102"
+			},
+			{
+				"id": 103,
+				"title": "Frontend Dev",
+				"organization": "CompanyC",
+				"url": "https://devglobaljobs.com/jobs/detail/103"
+			}
+		]
+	}`
+
+	routed := (&routedHTTP{}).
+		route("offset=0", listJSON).
+		// 101 fails with 500: transport/server failure -> Unreadable marker
+		routeErr("/api/v1/jobs/101", &StatusError{Method: "GET", Code: http.StatusInternalServerError, URL: "https://devglobaljobs.com/api/v1/jobs/101"}).
+		// 102 fails with 404: gone -> dropped (not returned)
+		routeErr("/api/v1/jobs/102", &StatusError{Method: "GET", Code: http.StatusNotFound, URL: "https://devglobaljobs.com/api/v1/jobs/102"}).
+		// 103 answers 200 with empty description -> Unreadable marker
+		route("/api/v1/jobs/103", `{"id":103,"description":"  "}`)
+
+	jobs, err := NewDevGlobalJobs(routed).Fetch(context.Background(), CompanyEntry{})
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+
+	// 102 was dropped on 404; 101 and 103 yield Unreadable markers
+	if len(jobs) != 2 {
+		t.Fatalf("len(jobs) = %d, want 2 (102 dropped on 404)", len(jobs))
+	}
+
+	j101 := jobs[0]
+	if !j101.Unreadable {
+		t.Errorf("job 101 should be marked Unreadable: %+v", j101)
+	}
+	if j101.ExternalID != "101" || j101.Company != "CompanyA" {
+		t.Errorf("unexpected identity for unreadable job 101: %+v", j101)
+	}
+
+	j103 := jobs[1]
+	if !j103.Unreadable {
+		t.Errorf("job 103 should be marked Unreadable: %+v", j103)
+	}
+	if j103.ExternalID != "103" || j103.Company != "CompanyC" {
+		t.Errorf("unexpected identity for unreadable job 103: %+v", j103)
 	}
 }
 
@@ -148,6 +278,10 @@ func TestDevGlobalJobsPagination(t *testing.T) {
 	routed := (&routedHTTP{}).
 		route("offset=0", page0JSON).
 		route("offset=100", page1JSON)
+
+	for i := 1; i <= 102; i++ {
+		routed.route(fmt.Sprintf("/api/v1/jobs/%d", i), fmt.Sprintf(`{"id":%d,"description":"desc"}`, i))
+	}
 
 	jobs, err := NewDevGlobalJobs(routed).Fetch(context.Background(), CompanyEntry{})
 	if err != nil {
@@ -273,5 +407,15 @@ func TestDevGlobalJobsListingError(t *testing.T) {
 	_, err := NewDevGlobalJobs(fake).Fetch(context.Background(), CompanyEntry{})
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+}
+
+func TestDevGlobalJobsPaced(t *testing.T) {
+	g, ok := pacedDevGlobalJobsGetter(&recordingJSONGetter{}).(rateLimitedJSONGetter)
+	if !ok {
+		t.Fatal("pacedDevGlobalJobsGetter should wrap getter in rateLimitedJSONGetter")
+	}
+	if g.limiter == nil {
+		t.Fatal("expected limiter to be set")
 	}
 }

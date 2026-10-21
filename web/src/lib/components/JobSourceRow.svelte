@@ -9,6 +9,7 @@
   import { promptSignIn } from '$lib/signin';
   import { Badge, EntityLogo } from '$lib/ui';
   import AdzunaAttribution from './AdzunaAttribution.svelte';
+  import DevGlobalJobsAttribution from './DevGlobalJobsAttribution.svelte';
 
   // The job page's provenance row: where this posting came from, and the control to stop
   // seeing that source at all. Lifted out of JobView — which is 1,100 lines — because it is
@@ -84,6 +85,10 @@
          in the provenance row beside the source chip, which is where a reader already looks
          to find out where a posting came from. -->
     <AdzunaAttribution {jobUrl} />
+  {:else if source === 'devglobaljobs'}
+    <!-- Required by Dev Global Jobs API terms: visible link to https://devglobaljobs.com
+         wherever postings from their feed are shown. -->
+    <DevGlobalJobsAttribution />
   {/if}
 
   {#if manuallyAdded}

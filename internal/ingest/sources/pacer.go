@@ -424,6 +424,23 @@ const (
 	doverRequestBurst    = 1
 )
 
+// Dev Global Jobs documents an API rate limit of 120 requests/minute per IP. We pace at
+// 600ms (~100 req/min, 1.67 req/s) with a burst of 5 to stay safely under the ceiling across
+// list pagination and concurrent detail hydration requests.
+const (
+	devglobaljobsRequestInterval = 600 * time.Millisecond
+	devglobaljobsRequestBurst    = 5
+)
+
+// pacedDevGlobalJobsGetter wraps a getter with a fresh limiter shared across one registry build,
+// so list pagination and detail hydration in a run compete for the same token bucket.
+func pacedDevGlobalJobsGetter(c JSONGetter) JSONGetter {
+	return rateLimitedJSONGetter{
+		inner:   c,
+		limiter: rate.NewLimiter(rate.Every(devglobaljobsRequestInterval), devglobaljobsRequestBurst),
+	}
+}
+
 // pacedDoverGetter wraps a getter with a fresh limiter shared across one registry build, so
 // every Dover board's resolve/list/detail requests in a run compete for the same token bucket
 // — otherwise the runner's per-board concurrency fires them all at once (see

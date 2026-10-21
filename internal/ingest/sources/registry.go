@@ -329,7 +329,9 @@ func All(c HTTPClient) map[string]Source {
 		NewArbeitnow(c),
 		NewRemoteOK(c),
 		NewJobicy(c),
-		NewDevGlobalJobs(c),
+		// devglobaljobs rates list and detail requests at 120 req/min per IP; paced
+		// (pacedDevGlobalJobsGetter) so pagination and detail hydration share the bucket.
+		NewDevGlobalJobs(pacedDevGlobalJobsGetter(c)),
 		NewWeWorkRemotely(c),
 		NewNoDesk(c),
 		NewCryptocurrencyJobs(c),
